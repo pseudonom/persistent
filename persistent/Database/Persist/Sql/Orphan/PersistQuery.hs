@@ -1,6 +1,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module Database.Persist.Sql.Orphan.PersistQuery
     ( deleteWhereCount
@@ -22,6 +23,7 @@ import Data.Int (Int64)
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Reader (ReaderT, ask)
 import Control.Exception (throwIO)
+import Data.Acquire (Acquire)
 import qualified Data.Conduit.List as CL
 import Data.Conduit
 import Data.ByteString.Char8 (readInteger)
@@ -30,101 +32,133 @@ import Data.List (transpose, inits, find)
 
 -- orphaned instance for convenience of modularity
 instance PersistQueryRead SqlBackend where
-    count filts = do
-        conn <- ask
-        let wher = if null filts
-                    then ""
-                    else filterClause False conn filts
-        let sql = mconcat
-                [ "SELECT COUNT(*) FROM "
-                , connEscapeName conn $ entityDB t
-                , wher
-                ]
-        withRawQuery sql (getFiltsValues conn filts) $ do
-            mm <- CL.head
-            case mm of
-              Just [PersistInt64 i] -> return $ fromIntegral i
-              Just [PersistDouble i] ->return $ fromIntegral (truncate i :: Int64) -- gb oracle
-              Just [PersistByteString i] -> case readInteger i of -- gb mssql 
-                                              Just (ret,"") -> return $ fromIntegral ret
-                                              xs -> error $ "invalid number i["++show i++"] xs[" ++ show xs ++ "]"
-              Just xs -> error $ "count:invalid sql  return xs["++show xs++"] sql["++show sql++"]"
-              Nothing -> error $ "count:invalid sql returned nothing sql["++show sql++"]"
-      where
-        t = entityDef $ dummyFromFilts filts
+    selectSourceRes = selectSourceResCore
+    selectKeysRes = selectKeysResCore
+    count = countCore
+instance PersistQueryRead SqlReadBackend where
+    selectSourceRes = selectSourceResCore
+    selectKeysRes = selectKeysResCore
+    count = countCore
+instance PersistQueryRead SqlWriteBackend where
+    selectSourceRes = selectSourceResCore
+    selectKeysRes = selectKeysResCore
+    count = countCore
 
-    selectSourceRes filts opts = do
-        conn <- ask
-        srcRes <- rawQueryRes (sql conn) (getFiltsValues conn filts)
-        return $ fmap ($= CL.mapM parse) srcRes
-      where
-        (limit, offset, orders) = limitOffsetOrder opts
 
-        parse vals = case parseEntityValues t vals of
-                       Left s -> liftIO $ throwIO $ PersistMarshalError s
-                       Right row -> return row
-        t = entityDef $ dummyFromFilts filts
-        wher conn = if null filts
-                    then ""
-                    else filterClause False conn filts
-        ord conn =
-            case map (orderClause False conn) orders of
-                [] -> ""
-                ords -> " ORDER BY " <> T.intercalate "," ords
-        cols = T.intercalate ", " . entityColumnNames t
-        sql conn = connLimitOffset conn (limit,offset) (not (null orders)) $ mconcat
-            [ "SELECT "
-            , cols conn
-            , " FROM "
+countCore
+    :: (MonadIO m, PersistEntity val, PersistEntityBackend val ~ backend, HasPersistBackend backend SqlBackend)
+    => [Filter val] -> ReaderT backend m Int
+countCore filts = do
+    conn <- persistBackend <$> ask
+    let wher = if null filts
+                then ""
+                else filterClause False conn filts
+    let sql = mconcat
+            [ "SELECT COUNT(*) FROM "
             , connEscapeName conn $ entityDB t
-            , wher conn
-            , ord conn
+            , wher
             ]
+    withRawQuery sql (getFiltsValues conn filts) $ do
+        mm <- CL.head
+        case mm of
+          Just [PersistInt64 i] -> return $ fromIntegral i
+          Just [PersistDouble i] ->return $ fromIntegral (truncate i :: Int64) -- gb oracle
+          Just [PersistByteString i] -> case readInteger i of -- gb mssql
+                                          Just (ret,"") -> return $ fromIntegral ret
+                                          xs -> error $ "invalid number i["++show i++"] xs[" ++ show xs ++ "]"
+          Just xs -> error $ "count:invalid sql  return xs["++show xs++"] sql["++show sql++"]"
+          Nothing -> error $ "count:invalid sql returned nothing sql["++show sql++"]"
+  where
+    t = entityDef $ dummyFromFilts filts
 
-    selectKeysRes filts opts = do
-        conn <- ask
-        srcRes <- rawQueryRes (sql conn) (getFiltsValues conn filts)
-        return $ fmap ($= CL.mapM parse) srcRes
-      where
-        t = entityDef $ dummyFromFilts filts
-        cols conn = T.intercalate "," $ dbIdColumns conn t
-                      
+selectSourceResCore
+    :: (PersistEntity val, MonadIO m1, MonadIO m2, HasPersistBackend backend SqlBackend, PersistEntityBackend val ~ backend)
+    => [Filter val] -> [SelectOpt val] -> ReaderT backend m1 (Acquire (Source m2 (Entity val)))
+selectSourceResCore filts opts = do
+    conn <- persistBackend <$> ask
+    srcRes <- rawQueryRes (sql conn) (getFiltsValues conn filts)
+    return $ fmap ($= CL.mapM parse) srcRes
+  where
+    (limit, offset, orders) = limitOffsetOrder opts
 
-        wher conn = if null filts
-                    then ""
-                    else filterClause False conn filts
-        sql conn = connLimitOffset conn (limit,offset) (not (null orders)) $ mconcat
-            [ "SELECT "
-            , cols conn
-            , " FROM "
-            , connEscapeName conn $ entityDB t
-            , wher conn
-            , ord conn
-            ]
+    parse vals = case parseEntityValues t vals of
+                   Left s -> liftIO $ throwIO $ PersistMarshalError s
+                   Right row -> return row
+    t = entityDef $ dummyFromFilts filts
+    wher conn = if null filts
+                then ""
+                else filterClause False conn filts
+    ord conn =
+        case map (orderClause False conn) orders of
+            [] -> ""
+            ords -> " ORDER BY " <> T.intercalate "," ords
+    cols = T.intercalate ", " . entityColumnNames t
+    sql conn = connLimitOffset conn (limit,offset) (not (null orders)) $ mconcat
+        [ "SELECT "
+        , cols conn
+        , " FROM "
+        , connEscapeName conn $ entityDB t
+        , wher conn
+        , ord conn
+        ]
 
-        (limit, offset, orders) = limitOffsetOrder opts
+selectKeysResCore
+    :: (MonadIO m1, MonadIO m2, PersistEntity val, HasPersistBackend backend SqlBackend, PersistEntityBackend val ~ backend)
+    => [Filter val] -> [SelectOpt val] -> ReaderT backend m1 (Acquire (Source m2 (Key val)))
+selectKeysResCore filts opts = do
+    conn <- persistBackend <$> ask
+    srcRes <- rawQueryRes (sql conn) (getFiltsValues conn filts)
+    return $ fmap ($= CL.mapM parse) srcRes
+  where
+    t = entityDef $ dummyFromFilts filts
+    cols conn = T.intercalate "," $ dbIdColumns conn t
 
-        ord conn =
-            case map (orderClause False conn) orders of
-                [] -> ""
-                ords -> " ORDER BY " <> T.intercalate "," ords
 
-        parse xs = do
-            keyvals <- case entityPrimary t of
-                      Nothing -> 
-                        case xs of
-                           [PersistInt64 x] -> return [PersistInt64 x]
-                           [PersistDouble x] -> return [PersistInt64 (truncate x)] -- oracle returns Double 
-                           _ -> liftIO $ throwIO $ PersistMarshalError $ "Unexpected in selectKeys False: " <> T.pack (show xs)
-                      Just pdef -> 
-                           let pks = map fieldHaskell $ compositeFields pdef
-                               keyvals = map snd $ filter (\(a, _) -> let ret=isJust (find (== a) pks) in ret) $ zip (map fieldHaskell $ entityFields t) xs
-                           in return keyvals
-            case keyFromValues keyvals of
-                Right k -> return k
-                Left _ -> error "selectKeysImpl: keyFromValues failed"
+    wher conn = if null filts
+                then ""
+                else filterClause False conn filts
+    sql conn = connLimitOffset conn (limit,offset) (not (null orders)) $ mconcat
+        [ "SELECT "
+        , cols conn
+        , " FROM "
+        , connEscapeName conn $ entityDB t
+        , wher conn
+        , ord conn
+        ]
+
+    (limit, offset, orders) = limitOffsetOrder opts
+
+    ord conn =
+        case map (orderClause False conn) orders of
+            [] -> ""
+            ords -> " ORDER BY " <> T.intercalate "," ords
+
+    parse xs = do
+        keyvals <- case entityPrimary t of
+                  Nothing ->
+                    case xs of
+                       [PersistInt64 x] -> return [PersistInt64 x]
+                       [PersistDouble x] -> return [PersistInt64 (truncate x)] -- oracle returns Double
+                       _ -> liftIO $ throwIO $ PersistMarshalError $ "Unexpected in selectKeys False: " <> T.pack (show xs)
+                  Just pdef ->
+                       let pks = map fieldHaskell $ compositeFields pdef
+                           keyvals = map snd $ filter (\(a, _) -> let ret=isJust (find (== a) pks) in ret) $ zip (map fieldHaskell $ entityFields t) xs
+                       in return keyvals
+        case keyFromValues keyvals of
+            Right k -> return k
+            Left _ -> error "selectKeysImpl: keyFromValues failed"
 
 instance PersistQueryWrite SqlBackend where
+
+    deleteWhere filts = do
+        _ <- deleteWhereCount filts
+        return ()
+
+    updateWhere filts upds = do
+        _ <- updateWhereCount filts upds
+        return ()
+
+instance PersistQueryWrite SqlWriteBackend where
 
     deleteWhere filts = do
         _ <- deleteWhereCount filts
@@ -137,11 +171,11 @@ instance PersistQueryWrite SqlBackend where
 -- | Same as 'deleteWhere', but returns the number of rows affected.
 --
 -- Since 1.1.5
-deleteWhereCount :: (PersistEntity val, MonadIO m, PersistEntityBackend val ~ SqlBackend)
+deleteWhereCount :: (PersistEntity val, MonadIO m, HasPersistBackend backend SqlBackend, PersistEntityBackend val ~ backend)
                  => [Filter val]
-                 -> ReaderT SqlBackend m Int64
+                 -> ReaderT backend m Int64
 deleteWhereCount filts = do
-    conn <- ask
+    conn <- persistBackend <$> ask
     let t = entityDef $ dummyFromFilts filts
     let wher = if null filts
                 then ""
@@ -156,13 +190,13 @@ deleteWhereCount filts = do
 -- | Same as 'updateWhere', but returns the number of rows affected.
 --
 -- Since 1.1.5
-updateWhereCount :: (PersistEntity val, MonadIO m, SqlBackend ~ PersistEntityBackend val)
+updateWhereCount :: (PersistEntity val, MonadIO m, HasPersistBackend backend SqlBackend, PersistEntityBackend val ~ backend)
                  => [Filter val]
                  -> [Update val]
-                 -> ReaderT SqlBackend m Int64
+                 -> ReaderT backend m Int64
 updateWhereCount _ [] = return 0
 updateWhereCount filts upds = do
-    conn <- ask
+    conn <- persistBackend <$> ask
     let wher = if null filts
                 then ""
                 else filterClause False conn filts
@@ -190,19 +224,22 @@ updateWhereCount filts upds = do
     updateField (Update f _ _) = fieldName f
     updateField _ = error "BackendUpdate not implemented"
 
-fieldName ::  forall record typ.  (PersistEntity record, PersistEntityBackend record ~ SqlBackend) => EntityField record typ -> DBName
+fieldName
+    ::  (PersistEntity record, PersistEntityBackend record ~ backend, HasPersistBackend backend SqlBackend)
+    => EntityField record typ -> DBName
 fieldName f = fieldDB $ persistFieldDef f
 
 dummyFromFilts :: [Filter v] -> Maybe v
 dummyFromFilts _ = Nothing
 
-getFiltsValues :: forall val. (PersistEntity val, PersistEntityBackend val ~ SqlBackend)
-               => SqlBackend -> [Filter val] -> [PersistValue]
+getFiltsValues
+    :: (PersistEntity val, PersistEntityBackend val ~ backend, HasPersistBackend backend SqlBackend)
+    => SqlBackend -> [Filter val] -> [PersistValue]
 getFiltsValues conn = snd . filterClauseHelper False False conn OrNullNo
 
 data OrNull = OrNullYes | OrNullNo
 
-filterClauseHelper :: (PersistEntity val, PersistEntityBackend val ~ SqlBackend)
+filterClauseHelper :: (PersistEntity val, PersistEntityBackend val ~ backend, HasPersistBackend backend SqlBackend)
              => Bool -- ^ include table name?
              -> Bool -- ^ include WHERE?
              -> SqlBackend
@@ -357,14 +394,14 @@ updatePersistValue :: Update v -> PersistValue
 updatePersistValue (Update _ v _) = toPersistValue v
 updatePersistValue _ = error "BackendUpdate not implemented"
 
-filterClause :: (PersistEntity val, PersistEntityBackend val ~ SqlBackend)
+filterClause :: (PersistEntity val, PersistEntityBackend val ~ backend, HasPersistBackend backend SqlBackend)
              => Bool -- ^ include table name?
              -> SqlBackend
              -> [Filter val]
              -> Text
 filterClause b c = fst . filterClauseHelper b True c OrNullNo
 
-orderClause :: (PersistEntity val, PersistEntityBackend val ~ SqlBackend)
+orderClause :: (PersistEntity val, PersistEntityBackend val ~ backend, HasPersistBackend backend SqlBackend)
             => Bool -- ^ include the table name
             -> SqlBackend
             -> SelectOpt val
@@ -378,15 +415,16 @@ orderClause includeTable conn o =
     dummyFromOrder :: SelectOpt a -> Maybe a
     dummyFromOrder _ = Nothing
 
-    tn = connEscapeName conn $ entityDB $ entityDef $ dummyFromOrder o
+    tn = connEscapeName (persistBackend conn) $ entityDB $ entityDef $ dummyFromOrder o
 
-    name :: (PersistEntityBackend record ~ SqlBackend, PersistEntity record)
+    name
+        :: (PersistEntityBackend record ~ backend, HasPersistBackend backend SqlBackend, PersistEntity record)
          => EntityField record typ -> Text
     name x =
         (if includeTable
             then ((tn <> ".") <>)
             else id)
-        $ connEscapeName conn $ fieldName x
+        $ connEscapeName (persistBackend conn) $ fieldName x
 
 -- | Generates sql for limit and offset for postgres, sqlite and mysql.
 decorateSQLWithLimitOffset::Text -> (Int,Int) -> Bool -> Text -> Text 

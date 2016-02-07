@@ -3,6 +3,7 @@
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -59,8 +60,16 @@ data SqlBackend = SqlBackend
     , connLogFunc :: LogFunc
     }
     deriving Typeable
+newtype SqlReadBackend
+  = SqlReadBackend { unSqlReadBackend :: SqlBackend } deriving Typeable
+newtype SqlWriteBackend
+  = SqlWriteBackend { unSqlWriteBackend :: SqlBackend } deriving Typeable
 instance HasPersistBackend SqlBackend SqlBackend where
     persistBackend = id
+instance HasPersistBackend SqlReadBackend SqlBackend where
+    persistBackend = unSqlReadBackend
+instance HasPersistBackend SqlWriteBackend SqlBackend where
+    persistBackend = unSqlWriteBackend
 
 type LogFunc = Loc -> LogSource -> LogLevel -> LogStr -> IO ()
 
