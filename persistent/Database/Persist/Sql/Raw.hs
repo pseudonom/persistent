@@ -19,7 +19,7 @@ import qualified Data.Text as T
 import Data.Conduit
 import Control.Monad.Trans.Resource (MonadResource,release)
 
-rawQuery :: (MonadResource m, MonadReader env m, HasPersistBackend env SqlBackend)
+rawQuery :: (MonadResource m, MonadReader backend m, HasPersistBackend backend SqlBackend)
          => Text
          -> [PersistValue]
          -> Source m [PersistValue]
@@ -30,12 +30,12 @@ rawQuery sql vals = do
     release releaseKey
 
 rawQueryRes
-    :: (MonadIO m1, MonadIO m2)
+    :: (MonadIO m1, MonadIO m2, HasPersistBackend backend SqlBackend)
     => Text
     -> [PersistValue]
-    -> ReaderT SqlBackend m1 (Acquire (Source m2 [PersistValue]))
+    -> ReaderT backend m1 (Acquire (Source m2 [PersistValue]))
 rawQueryRes sql vals = do
-    conn <- ask
+    conn <- persistBackend <$> ask
     let make = do
             runLoggingT (logDebugNS (pack "SQL") $ T.append sql $ pack $ "; " ++ show vals)
                 (connLogFunc conn)
@@ -45,20 +45,20 @@ rawQueryRes sql vals = do
         stmtQuery stmt vals
 
 -- | Execute a raw SQL statement
-rawExecute :: MonadIO m
+rawExecute :: (MonadIO m, HasPersistBackend backend SqlBackend)
            => Text            -- ^ SQL statement, possibly with placeholders.
            -> [PersistValue]  -- ^ Values to fill the placeholders.
-           -> ReaderT SqlBackend m ()
+           -> ReaderT backend m ()
 rawExecute x y = liftM (const ()) $ rawExecuteCount x y
 
 -- | Execute a raw SQL statement and return the number of
 -- rows it has modified.
-rawExecuteCount :: MonadIO m
+rawExecuteCount :: (MonadIO m, HasPersistBackend backend SqlBackend)
                 => Text            -- ^ SQL statement, possibly with placeholders.
                 -> [PersistValue]  -- ^ Values to fill the placeholders.
-                -> ReaderT SqlBackend m Int64
+                -> ReaderT backend m Int64
 rawExecuteCount sql vals = do
-    conn <- ask
+    conn <- persistBackend <$> ask
     runLoggingT (logDebugNS (pack "SQL") $ T.append sql $ pack $ "; " ++ show vals)
         (connLogFunc conn)
     stmt <- getStmt sql
@@ -66,18 +66,19 @@ rawExecuteCount sql vals = do
     liftIO $ stmtReset stmt
     return res
 
-getStmt :: MonadIO m => Text -> ReaderT SqlBackend m Statement
+getStmt :: (MonadIO m, HasPersistBackend backend SqlBackend)
+        => Text -> ReaderT backend m Statement
 getStmt sql = do
-    conn <- ask
+    conn <- persistBackend <$> ask
     liftIO $ getStmtConn conn sql
 
-getStmtConn :: SqlBackend -> Text -> IO Statement
+getStmtConn :: (HasPersistBackend backend SqlBackend) => backend -> Text -> IO Statement
 getStmtConn conn sql = do
-    smap <- liftIO $ readIORef $ connStmtMap conn
+    smap <- liftIO $ readIORef $ connStmtMap $ persistBackend conn
     case Map.lookup sql smap of
         Just stmt -> return stmt
         Nothing -> do
-            stmt' <- liftIO $ connPrepare conn sql
+            stmt' <- liftIO $ connPrepare (persistBackend conn) sql
             iactive <- liftIO $ newIORef True
             let stmt = Statement
                     { stmtFinalize = do
@@ -101,7 +102,7 @@ getStmtConn conn sql = do
                             then stmtQuery stmt' x
                             else liftIO $ throwIO $ StatementAlreadyFinalized sql
                     }
-            liftIO $ writeIORef (connStmtMap conn) $ Map.insert sql stmt smap
+            liftIO $ writeIORef (connStmtMap $ persistBackend conn) $ Map.insert sql stmt smap
             return stmt
 
 -- | Execute a raw SQL statement and return its results as a
@@ -200,10 +201,10 @@ getStmtConn conn sql = do
 -- >          liftIO (print xs)
 -- > 
 
-rawSql :: (RawSql a, MonadIO m)
+rawSql :: (RawSql a, MonadIO m, HasPersistBackend backend SqlBackend)
        => Text             -- ^ SQL statement, possibly with placeholders.
        -> [PersistValue]   -- ^ Values to fill the placeholders.
-       -> ReaderT SqlBackend m [a]
+       -> ReaderT backend m [a]
 rawSql stmt = run
     where
       getType :: (x -> m [a]) -> a
@@ -231,7 +232,7 @@ rawSql stmt = run
                         ]
 
       run params = do
-        conn <- ask
+        conn <- persistBackend <$> ask
         let (colCount, colSubsts) = rawSqlCols (connEscapeName conn) x
         withStmt' colSubsts params $ firstRow colCount
 

@@ -4,6 +4,7 @@
 {-# LANGUAGE ConstraintKinds #-}
 module Database.Persist.Class.PersistStore
     ( HasPersistBackend (..)
+    , IsPersistBackend (..)
     , liftPersist
     , PersistCore (..)
     , PersistStoreRead (..)
@@ -27,6 +28,11 @@ import qualified Data.Aeson as A
 
 class HasPersistBackend env backend | env -> backend where
     persistBackend :: env -> backend
+class
+    (HasPersistBackend wrapped backend)
+    => IsPersistBackend backend wrapped
+    | wrapped -> backend where
+    mkPersistBackend :: backend -> wrapped
 
 liftPersist :: (MonadReader env m, HasPersistBackend env backend, MonadIO m)
             => ReaderT backend IO a

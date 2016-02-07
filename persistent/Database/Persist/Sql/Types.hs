@@ -3,6 +3,7 @@
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -18,7 +19,7 @@ import Control.Monad.Trans.Reader (ReaderT (..))
 import Control.Monad.Trans.Writer (WriterT)
 import Data.Typeable (Typeable)
 import Database.Persist.Types
-import Database.Persist.Class (HasPersistBackend (..))
+import Database.Persist.Class (HasPersistBackend (..), IsPersistBackend (..))
 import Data.IORef (IORef)
 import Data.Map (Map)
 import Data.Int (Int64)
@@ -59,8 +60,22 @@ data SqlBackend = SqlBackend
     , connLogFunc :: LogFunc
     }
     deriving Typeable
+newtype SqlReadBackend
+  = SqlReadBackend { unSqlReadBackend :: SqlBackend } deriving Typeable
+newtype SqlWriteBackend
+  = SqlWriteBackend { unSqlWriteBackend :: SqlBackend } deriving Typeable
+instance IsPersistBackend SqlBackend SqlBackend where
+  mkPersistBackend = id
+instance IsPersistBackend SqlBackend SqlReadBackend where
+  mkPersistBackend = SqlReadBackend
+instance IsPersistBackend SqlBackend SqlWriteBackend where
+  mkPersistBackend = SqlWriteBackend
 instance HasPersistBackend SqlBackend SqlBackend where
     persistBackend = id
+instance HasPersistBackend SqlReadBackend SqlBackend where
+    persistBackend = unSqlReadBackend
+instance HasPersistBackend SqlWriteBackend SqlBackend where
+    persistBackend = unSqlWriteBackend
 
 type LogFunc = Loc -> LogSource -> LogLevel -> LogStr -> IO ()
 
