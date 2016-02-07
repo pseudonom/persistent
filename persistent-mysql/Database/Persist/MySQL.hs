@@ -31,6 +31,7 @@ import Data.Fixed (Pico)
 import Data.Function (on)
 import Data.IORef
 import Data.List (find, intercalate, sort, groupBy)
+import Data.Pool (Pool)
 import Data.Text (Text, pack)
 import qualified Data.Text.IO as T
 import Text.Read (readMaybe)
@@ -63,48 +64,51 @@ import Control.Monad.Trans.Resource (runResourceT)
 -- The pool is properly released after the action finishes using
 -- it.  Note that you should not use the given 'ConnectionPool'
 -- outside the action since it may be already been released.
-withMySQLPool :: (MonadIO m, MonadLogger m, MonadBaseControl IO m) =>
-                 MySQL.ConnectInfo
-              -- ^ Connection information.
-              -> Int
-              -- ^ Number of connections to be kept open in the pool.
-              -> (ConnectionPool -> m a)
-              -- ^ Action to be executed that uses the connection pool.
-              -> m a
+withMySQLPool
+    :: (MonadIO m, MonadLogger m, MonadBaseControl IO m, IsPersistBackend SqlBackend backend)
+    => MySQL.ConnectInfo
+    -- ^ Connection information.
+    -> Int
+    -- ^ Number of connections to be kept open in the pool.
+    -> (Pool backend -> m a)
+    -- ^ Action to be executed that uses the connection pool.
+    -> m a
 withMySQLPool ci = withSqlPool $ open' ci
 
 
 -- | Create a MySQL connection pool.  Note that it's your
 -- responsibility to properly close the connection pool when
 -- unneeded.  Use 'withMySQLPool' for automatic resource control.
-createMySQLPool :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) =>
-                   MySQL.ConnectInfo
-                -- ^ Connection information.
-                -> Int
-                -- ^ Number of connections to be kept open in the pool.
-                -> m ConnectionPool
+createMySQLPool
+    :: (MonadBaseControl IO m, MonadIO m, MonadLogger m, IsPersistBackend SqlBackend backend)
+    => MySQL.ConnectInfo
+    -- ^ Connection information.
+    -> Int
+    -- ^ Number of connections to be kept open in the pool.
+    -> m (Pool backend)
 createMySQLPool ci = createSqlPool $ open' ci
 
 
 -- | Same as 'withMySQLPool', but instead of opening a pool
 -- of connections, only one connection is opened.
-withMySQLConn :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) =>
-                 MySQL.ConnectInfo
-              -- ^ Connection information.
-              -> (SqlBackend -> m a)
-              -- ^ Action to be executed that uses the connection.
-              -> m a
+withMySQLConn
+    :: (MonadBaseControl IO m, MonadIO m, MonadLogger m, IsPersistBackend SqlBackend backend)
+    => MySQL.ConnectInfo
+    -- ^ Connection information.
+    -> (backend -> m a)
+    -- ^ Action to be executed that uses the connection.
+    -> m a
 withMySQLConn = withSqlConn . open'
 
 
 -- | Internal function that opens a connection to the MySQL
 -- server.
-open' :: MySQL.ConnectInfo -> LogFunc -> IO SqlBackend
+open' :: (IsPersistBackend SqlBackend backend) => MySQL.ConnectInfo -> LogFunc -> IO backend
 open' ci logFunc = do
     conn <- MySQL.connect ci
     MySQLBase.autocommit conn False -- disable autocommit!
     smap <- newIORef $ Map.empty
-    return SqlBackend
+    return . mkPersistBackend $ SqlBackend
         { connPrepare    = prepare' conn
         , connStmtMap    = smap
         , connInsertSql  = insertSql'
